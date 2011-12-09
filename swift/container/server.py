@@ -1,4 +1,5 @@
 # Copyright (c) 2010-2011 OpenStack, LLC.
+# Copyright (c) 2008-2011 Gluster, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -31,15 +32,16 @@ from webob.exc import HTTPAccepted, HTTPBadRequest, HTTPConflict, \
 
 from swift.common.db import ContainerBroker
 from swift.common.utils import get_logger, get_param, hash_path, \
-    normalize_timestamp, storage_directory, split_path, validate_sync_to
+    normalize_timestamp, storage_directory, split_path, validate_sync_to, \
+    plugin_enabled
 from swift.common.constraints import CONTAINER_LISTING_LIMIT, \
     check_mount, check_float, check_utf8
 from swift.common.bufferedhttp import http_connect
 from swift.common.exceptions import ConnectionTimeout
 from swift.common.db_replicator import ReplicatorRpc
-
+if plugin_enabled():
+    from swift.plugins.DiskDir import DiskDir
 DATADIR = 'containers'
-
 
 class ContainerController(object):
     """WSGI Controller for the container server."""
@@ -62,6 +64,7 @@ class ContainerController(object):
             ContainerBroker, self.mount_check, logger=self.logger)
         self.auto_create_account_prefix = \
             conf.get('auto_create_account_prefix') or '.'
+        self.fs_object = None
 
     def _get_container_broker(self, drive, part, account, container):
         """
@@ -73,6 +76,11 @@ class ContainerController(object):
         :param container: container name
         :returns: ContainerBroker object
         """
+        if self.fs_object:
+            return DiskDir(self.root, drive, part, account,
+                           container, self.logger,
+                           fs_object = self.fs_object)
+
         hsh = hash_path(account, container)
         db_dir = storage_directory(DATADIR, part, hsh)
         db_path = os.path.join(self.root, drive, db_dir, hsh + '.db')
@@ -211,10 +219,18 @@ class ContainerController(object):
                 if broker.is_deleted():
                     return HTTPConflict(request=req)
             metadata = {}
-            metadata.update((key, (value, timestamp))
-                for key, value in req.headers.iteritems()
-                if key.lower() in self.save_headers or
-                   key.lower().startswith('x-container-meta-'))
+            #Note: check the structure of req.headers
+            if not self.fs_object:
+                metadata.update((key, (value, timestamp))
+                    for key, value in req.headers.iteritems()
+                    if key.lower() in self.save_headers or
+                       key.lower().startswith('x-container-meta-'))
+            else:
+                metadata.update((key, value)
+                   for key, value in req.headers.iteritems()
+                   if key.lower() in self.save_headers or
+                      key.lower().startswith('x-container-meta-'))
+
             if metadata:
                 if 'X-Container-Sync-To' in metadata:
                     if 'X-Container-Sync-To' not in broker.metadata or \
@@ -222,6 +238,7 @@ class ContainerController(object):
                             broker.metadata['X-Container-Sync-To'][0]:
                         broker.set_x_container_sync_points(-1, -1)
                 broker.update_metadata(metadata)
+
             resp = self.account_update(req, account, container, broker)
             if resp:
                 return resp
@@ -252,10 +269,17 @@ class ContainerController(object):
             'X-Timestamp': info['created_at'],
             'X-PUT-Timestamp': info['put_timestamp'],
         }
-        headers.update((key, value)
-            for key, (value, timestamp) in broker.metadata.iteritems()
-            if value != '' and (key.lower() in self.save_headers or
-                                key.lower().startswith('x-container-meta-')))
+        if not self.fs_object:
+            headers.update((key, value)
+                for key, (value, timestamp) in broker.metadata.iteritems()
+                if value != '' and (key.lower() in self.save_headers or
+                                    key.lower().startswith('x-container-meta-')))
+        else:
+            headers.update((key, value)
+                for key, value in broker.metadata.iteritems()
+                if value != '' and (key.lower() in self.save_headers or
+                                    key.lower().startswith('x-container-meta-')))
+            
         return HTTPNoContent(request=req, headers=headers)
 
     def GET(self, req):
@@ -268,6 +292,7 @@ class ContainerController(object):
                                 request=req)
         if self.mount_check and not check_mount(self.root, drive):
             return Response(status='507 %s is not mounted' % drive)
+
         broker = self._get_container_broker(drive, part, account, container)
         broker.pending_timeout = 0.1
         broker.stale_reads_ok = True
@@ -280,10 +305,17 @@ class ContainerController(object):
             'X-Timestamp': info['created_at'],
             'X-PUT-Timestamp': info['put_timestamp'],
         }
-        resp_headers.update((key, value)
-            for key, (value, timestamp) in broker.metadata.iteritems()
-            if value != '' and (key.lower() in self.save_headers or
-                                key.lower().startswith('x-container-meta-')))
+        if not self.fs_object:
+            resp_headers.update((key, value)
+                for key, (value, timestamp) in broker.metadata.iteritems()
+                if value != '' and (key.lower() in self.save_headers or
+                               key.lower().startswith('x-container-meta-')))
+        else:
+            resp_headers.update((key, value)
+                for key, value in broker.metadata.iteritems()
+                if value != '' and (key.lower() in self.save_headers or
+                               key.lower().startswith('x-container-meta-')))
+
         try:
             path = get_param(req, 'path')
             prefix = get_param(req, 'prefix')
@@ -408,10 +440,17 @@ class ContainerController(object):
             return HTTPNotFound(request=req)
         timestamp = normalize_timestamp(req.headers['x-timestamp'])
         metadata = {}
-        metadata.update((key, (value, timestamp))
-            for key, value in req.headers.iteritems()
-            if key.lower() in self.save_headers or
-               key.lower().startswith('x-container-meta-'))
+        if not self.fs_object:
+            metadata.update((key, (value, timestamp))
+                for key, value in req.headers.iteritems()
+                if key.lower() in self.save_headers or
+                   key.lower().startswith('x-container-meta-'))
+        else:
+             metadata.update((key, value)
+                for key, value in req.headers.iteritems()
+                if key.lower() in self.save_headers or
+                   key.lower().startswith('x-container-meta-'))
+            
         if metadata:
             if 'X-Container-Sync-To' in metadata:
                 if 'X-Container-Sync-To' not in broker.metadata or \
@@ -421,8 +460,19 @@ class ContainerController(object):
             broker.update_metadata(metadata)
         return HTTPNoContent(request=req)
 
+    def plugin(self, env):
+        if env.get('Gluster_enabled', False):
+            self.fs_object = env.get('fs_object')
+            if not self.fs_object:
+                raise NoneTypeError
+            self.root = env.get('root')
+            self.mount_check = False
+        else:
+            self.fs_object = None
+
     def __call__(self, env, start_response):
         start_time = time.time()
+        self.plugin(env)
         req = Request(env)
         self.logger.txn_id = req.headers.get('x-trans-id', None)
         if not check_utf8(req.path_info):

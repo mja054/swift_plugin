@@ -6,8 +6,16 @@ import sys
 import os
 from ConfigParser import MissingSectionHeaderError
 from StringIO import StringIO
-
 from swift.common.utils import readconf
+from swift.common.utils import plugin_enabled
+if plugin_enabled():
+    from swift.plugins.constraints import MAX_OBJECT_NAME_LENGTH, \
+          MAX_CONTAINER_NAME_LENGTH, MAX_ACCOUNT_NAME_LENGTH, \
+          MAX_FILE_SIZE
+else:
+    from swift.common.constraints import MAX_OBJECT_NAME_LENGTH, \
+          MAX_CONTAINER_NAME_LENGTH, MAX_ACCOUNT_NAME_LENGTH, \
+          MAX_FILE_SIZE
 
 setattr(__builtin__, '_', lambda x: x)
 

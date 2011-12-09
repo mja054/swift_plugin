@@ -1,5 +1,6 @@
 #!/usr/bin/python
 # Copyright (c) 2010-2011 OpenStack, LLC.
+# Copyright (c) 2008-2011 Gluster, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -77,6 +78,7 @@ setup(
             'staticweb=swift.common.middleware.staticweb:filter_factory',
             'tempauth=swift.common.middleware.tempauth:filter_factory',
             'recon=swift.common.middleware.recon:filter_factory',
+            'gluster=swift.common.middleware.gluster:filter_factory',
             ],
         },
     )

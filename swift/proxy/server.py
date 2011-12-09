@@ -1,4 +1,5 @@
 # Copyright (c) 2010-2011 OpenStack, LLC.
+# Copyright (c) 2008-2011 Gluster, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -54,11 +55,19 @@ from webob import Request, Response
 
 from swift.common.ring import Ring
 from swift.common.utils import cache_from_env, ContextPool, get_logger, \
-    get_remote_client, normalize_timestamp, split_path, TRUE_VALUES
+    get_remote_client, normalize_timestamp, split_path, plugin_enabled, \
+    TRUE_VALUES
 from swift.common.bufferedhttp import http_connect
-from swift.common.constraints import check_metadata, check_object_creation, \
-    check_utf8, CONTAINER_LISTING_LIMIT, MAX_ACCOUNT_NAME_LENGTH, \
-    MAX_CONTAINER_NAME_LENGTH, MAX_FILE_SIZE
+if plugin_enabled():
+    from swift.plugins.constraints import check_object_creation, \
+        MAX_ACCOUNT_NAME_LENGTH, MAX_CONTAINER_NAME_LENGTH, MAX_FILE_SIZE
+else:
+    from swift.common.constraints import check_object_creation, \
+        MAX_ACCOUNT_NAME_LENGTH, MAX_CONTAINER_NAME_LENGTH, MAX_FILE_SIZE
+
+from swift.common.constraints import check_metadata, check_utf8, \
+                CONTAINER_LISTING_LIMIT
+
 from swift.common.exceptions import ChunkReadTimeout, \
     ChunkWriteTimeout, ConnectionTimeout
 

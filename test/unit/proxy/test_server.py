@@ -1,4 +1,5 @@
 # Copyright (c) 2010-2011 OpenStack, LLC.
+# Copyright (c) 2008-2011 Gluster, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,7 +22,6 @@ import os
 import sys
 import unittest
 from nose import SkipTest
-from ConfigParser import ConfigParser
 from contextlib import contextmanager
 from cStringIO import StringIO
 from gzip import GzipFile
@@ -44,8 +44,18 @@ from swift.account import server as account_server
 from swift.container import server as container_server
 from swift.obj import server as object_server
 from swift.common import ring
-from swift.common.constraints import MAX_META_NAME_LENGTH, \
-    MAX_META_VALUE_LENGTH, MAX_META_COUNT, MAX_META_OVERALL_SIZE, MAX_FILE_SIZE
+from swift.common.utils import plugin_enabled
+if plugin_enabled():
+    from swift.plugins.constraints import MAX_META_NAME_LENGTH, \
+        MAX_META_VALUE_LENGTH, MAX_META_COUNT, MAX_META_OVERALL_SIZE, \
+        MAX_FILE_SIZE, MAX_ACCOUNT_NAME_LENGTH, MAX_CONTAINER_NAME_LENGTH, \
+        MAX_OBJECT_NAME_LENGTH
+else:
+    from swift.plugins.constraints import MAX_META_NAME_LENGTH, \
+        MAX_META_VALUE_LENGTH, MAX_META_COUNT, MAX_META_OVERALL_SIZE, \
+        MAX_FILE_SIZE, MAX_ACCOUNT_NAME_LENGTH, MAX_CONTAINER_NAME_LENGTH, \
+        MAX_OBJECT_NAME_LENGTH
+
 from swift.common.utils import mkdirs, normalize_timestamp, NullLogger
 from swift.common.wsgi import monkey_patch_mimetools
 
@@ -3150,7 +3160,8 @@ class TestContainerController(unittest.TestCase):
     def test_PUT_max_container_name_length(self):
         with save_globals():
             controller = proxy_server.ContainerController(self.app, 'account',
-                                                              '1' * 256)
+                                                              '1' *
+                                                               MAX_CONTAINER_NAME_LENGTH,)
             self.assert_status_map(controller.PUT,
                                    (200, 200, 200, 201, 201, 201), 201,
                                    missing_container=True)
@@ -3749,7 +3760,8 @@ class TestAccountController(unittest.TestCase):
     def test_PUT_max_account_name_length(self):
         with save_globals():
             self.app.allow_account_management = True
-            controller = proxy_server.AccountController(self.app, '1' * 256)
+            controller = proxy_server.AccountController(self.app, '1' *
+                            MAX_ACCOUNT_NAME_LENGTH)
             self.assert_status_map(controller.PUT, (201, 201, 201), 201)
             controller = proxy_server.AccountController(self.app, '2' * 257)
             self.assert_status_map(controller.PUT, (201, 201, 201), 400)

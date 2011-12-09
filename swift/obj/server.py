@@ -1,4 +1,5 @@
 # Copyright (c) 2010-2011 OpenStack, LLC.
+# Copyright (c) 2008-2011 Gluster, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -26,6 +27,7 @@ from hashlib import md5
 from tempfile import mkstemp
 from urllib import unquote
 from contextlib import contextmanager
+from ConfigParser import ConfigParser
 
 from webob import Request, Response, UTC
 from webob.exc import HTTPAccepted, HTTPBadRequest, HTTPCreated, \
@@ -37,15 +39,22 @@ from eventlet import sleep, Timeout, tpool
 
 from swift.common.utils import mkdirs, normalize_timestamp, \
     storage_directory, hash_path, renamer, fallocate, \
-    split_path, drop_buffer_cache, get_logger, write_pickle
+    split_path, drop_buffer_cache, get_logger, write_pickle, \
+    plugin_enabled
 from swift.common.bufferedhttp import http_connect
-from swift.common.constraints import check_object_creation, check_mount, \
-    check_float, check_utf8
+if plugin_enabled():
+    from swift.plugins.constraints import check_object_creation
+    from swift.plugins.utils import X_TYPE, X_OBJECT_TYPE, FILE, DIR, MARKER_DIR, \
+         OBJECT, DIR_TYPE, FILE_TYPE
+else:
+    from swift.common.constraints import check_object_creation
+
+from swift.common.constraints import  check_mount, check_float, check_utf8
+
 from swift.common.exceptions import ConnectionTimeout, DiskFileError, \
     DiskFileNotExist
 from swift.obj.replicator import tpooled_get_hashes, invalidate_hash, \
     quarantine_renamer
-
 
 DATADIR = 'objects'
 ASYNCDIR = 'async_pending'
@@ -339,6 +348,9 @@ class DiskFile(object):
                 raise
         raise DiskFileNotExist('Data File does not exist.')
 
+if plugin_enabled():
+    from swift.plugins.DiskFile import Gluster_DiskFile
+
 
 class ObjectController(object):
     """Implements the WSGI application for the Swift Object Server."""
@@ -377,6 +389,17 @@ class ObjectController(object):
             'expiring_objects'
         self.expiring_objects_container_divisor = \
             int(conf.get('expiring_objects_container_divisor') or 86400)
+        self.fs_object = None
+
+    def get_DiskFile_obj(self, path, device, partition, account, container, obj,
+                         logger, keep_data_fp=False, disk_chunk_size=65536):
+        if self.fs_object:
+            return Gluster_DiskFile(path, device, partition, account, container,
+                            obj, logger, keep_data_fp,
+                            disk_chunk_size, fs_object = self.fs_object);
+        else:
+            return DiskFile(path, device, partition, account, container,
+                            obj, logger, keep_data_fp, disk_chunk_size)
 
     def async_update(self, op, account, container, obj, host, partition,
                      contdevice, headers_out, objdevice):
@@ -493,7 +516,7 @@ class ObjectController(object):
                                   content_type='text/plain')
         if self.mount_check and not check_mount(self.devices, device):
             return Response(status='507 %s is not mounted' % device)
-        file = DiskFile(self.devices, device, partition, account, container,
+        file = self.get_DiskFile_obj(self.devices, device, partition, account, container,
                         obj, self.logger, disk_chunk_size=self.disk_chunk_size)
 
         if 'X-Delete-At' in file.metadata and \
@@ -548,7 +571,7 @@ class ObjectController(object):
         if new_delete_at and new_delete_at < time.time():
             return HTTPBadRequest(body='X-Delete-At in past', request=request,
                                   content_type='text/plain')
-        file = DiskFile(self.devices, device, partition, account, container,
+        file = self.get_DiskFile_obj(self.devices, device, partition, account, container,
                         obj, self.logger, disk_chunk_size=self.disk_chunk_size)
         orig_timestamp = file.metadata.get('X-Timestamp')
         upload_expiration = time.time() + self.max_upload_time
@@ -580,12 +603,29 @@ class ObjectController(object):
             if 'etag' in request.headers and \
                             request.headers['etag'].lower() != etag:
                 return HTTPUnprocessableEntity(request=request)
-            metadata = {
-                'X-Timestamp': request.headers['x-timestamp'],
-                'Content-Type': request.headers['content-type'],
-                'ETag': etag,
-                'Content-Length': str(os.fstat(fd).st_size),
-            }
+            content_type = request.headers['content-type']
+            if self.fs_object and not content_type:
+                content_type = FILE_TYPE
+            if not self.fs_object:
+                metadata = {
+                    'X-Timestamp': request.headers['x-timestamp'],
+                    'Content-Type': request.headers['content-type'],
+                    'ETag': etag,
+                    'Content-Length': str(os.fstat(fd).st_size),
+                }
+            else:
+                metadata = {
+                    'X-Timestamp': request.headers['x-timestamp'],
+                    'Content-Type': request.headers['content-type'],
+                    'ETag': etag,
+                    'Content-Length': str(os.fstat(fd).st_size),
+                    X_TYPE: OBJECT,
+                    X_OBJECT_TYPE: FILE,
+                }
+
+            if self.fs_object and \
+                request.headers['content-type'].lower() == DIR_TYPE:
+                metadata.update({X_OBJECT_TYPE: MARKER_DIR})
             metadata.update(val for val in request.headers.iteritems()
                     if val[0].lower().startswith('x-object-meta-') and
                     len(val[0]) > 14)
@@ -626,9 +666,9 @@ class ObjectController(object):
                         content_type='text/plain')
         if self.mount_check and not check_mount(self.devices, device):
             return Response(status='507 %s is not mounted' % device)
-        file = DiskFile(self.devices, device, partition, account, container,
-                        obj, self.logger, keep_data_fp=True,
-                        disk_chunk_size=self.disk_chunk_size)
+        file = self.get_DiskFile_obj(self.devices, device, partition, account, container,
+                             obj, self.logger, keep_data_fp=True,
+                             disk_chunk_size=self.disk_chunk_size)
         if file.is_deleted() or ('X-Delete-At' in file.metadata and
                 int(file.metadata['X-Delete-At']) <= time.time()):
             if request.headers.get('if-match') == '*':
@@ -702,7 +742,7 @@ class ObjectController(object):
             return resp
         if self.mount_check and not check_mount(self.devices, device):
             return Response(status='507 %s is not mounted' % device)
-        file = DiskFile(self.devices, device, partition, account, container,
+        file = self.get_DiskFile_obj(self.devices, device, partition, account, container,
                         obj, self.logger, disk_chunk_size=self.disk_chunk_size)
         if file.is_deleted() or ('X-Delete-At' in file.metadata and
                 int(file.metadata['X-Delete-At']) <= time.time()):
@@ -744,7 +784,7 @@ class ObjectController(object):
         if self.mount_check and not check_mount(self.devices, device):
             return Response(status='507 %s is not mounted' % device)
         response_class = HTTPNoContent
-        file = DiskFile(self.devices, device, partition, account, container,
+        file = self.get_DiskFile_obj(self.devices, device, partition, account, container,
                         obj, self.logger, disk_chunk_size=self.disk_chunk_size)
         if 'x-if-delete-at' in request.headers and \
                 int(request.headers['x-if-delete-at']) != \
@@ -797,9 +837,18 @@ class ObjectController(object):
             raise hashes
         return Response(body=pickle.dumps(hashes))
 
+    def plugin(self, env):
+        if env.get('Gluster_enabled', False):
+            self.fs_object = env.get('fs_object')
+            self.devices = env.get('root')
+            self.mount_check = False
+        else:
+            self.fs_object = None
+
     def __call__(self, env, start_response):
         """WSGI Application entry point for the Swift Object Server."""
         start_time = time.time()
+        self.plugin(env)
         req = Request(env)
         self.logger.txn_id = req.headers.get('x-trans-id', None)
         if not check_utf8(req.path_info):

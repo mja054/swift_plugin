@@ -1,4 +1,5 @@
 # Copyright (c) 2010-2011 OpenStack, LLC.
+# Copyright (c) 2008-2011 Gluster, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -31,11 +32,12 @@ import simplejson
 
 from swift.common.db import AccountBroker
 from swift.common.utils import get_logger, get_param, hash_path, \
-    normalize_timestamp, split_path, storage_directory
+    normalize_timestamp, split_path, storage_directory, plugin_enabled
 from swift.common.constraints import ACCOUNT_LISTING_LIMIT, \
     check_mount, check_float, check_utf8
 from swift.common.db_replicator import ReplicatorRpc
-
+if plugin_enabled():
+    from swift.plugins.DiskDir import DiskAccount
 
 DATADIR = 'accounts'
 
@@ -52,8 +54,12 @@ class AccountController(object):
             self.mount_check, logger=self.logger)
         self.auto_create_account_prefix = \
             conf.get('auto_create_account_prefix') or '.'
+        self.fs_object = None
 
     def _get_account_broker(self, drive, part, account):
+        if self.fs_object:
+            return DiskAccount(self.root, account, self.fs_object)
+
         hsh = hash_path(account)
         db_dir = storage_directory(DATADIR, part, hsh)
         db_path = os.path.join(self.root, drive, db_dir, hsh + '.db')
@@ -121,9 +127,15 @@ class AccountController(object):
                 if broker.is_deleted():
                     return HTTPConflict(request=req)
             metadata = {}
-            metadata.update((key, (value, timestamp))
-                for key, value in req.headers.iteritems()
-                if key.lower().startswith('x-account-meta-'))
+            if not self.fs_object:
+                metadata.update((key, (value, timestamp))
+                    for key, value in req.headers.iteritems()
+                    if key.lower().startswith('x-account-meta-'))
+            else:
+                metadata.update((key, value)
+                    for key, value in req.headers.iteritems()
+                    if key.lower().startswith('x-account-meta-'))
+                
             if metadata:
                 broker.update_metadata(metadata)
             if created:
@@ -164,9 +176,16 @@ class AccountController(object):
             container_ts = broker.get_container_timestamp(container)
             if container_ts is not None:
                 headers['X-Container-Timestamp'] = container_ts
-        headers.update((key, value)
-            for key, (value, timestamp) in broker.metadata.iteritems()
-            if value != '')
+        if not self.fs_object:
+            headers.update((key, value)
+                for key, (value, timestamp) in broker.metadata.iteritems()
+                if value != '')
+        else:
+            headers.update((key, value)
+                for key, value in broker.metadata.iteritems()
+                if value != '')
+            
+        
         return HTTPNoContent(request=req, headers=headers)
 
     def GET(self, req):
@@ -190,9 +209,15 @@ class AccountController(object):
             'X-Account-Bytes-Used': info['bytes_used'],
             'X-Timestamp': info['created_at'],
             'X-PUT-Timestamp': info['put_timestamp']}
-        resp_headers.update((key, value)
-            for key, (value, timestamp) in broker.metadata.iteritems()
-            if value != '')
+        if not self.fs_object:
+            resp_headers.update((key, value)
+                for key, (value, timestamp) in broker.metadata.iteritems()
+                if value != '')
+        else:
+            resp_headers.update((key, value)
+                for key, value in broker.metadata.iteritems()
+                if value != '')
+
         try:
             prefix = get_param(req, 'prefix')
             delimiter = get_param(req, 'delimiter')
@@ -224,6 +249,7 @@ class AccountController(object):
                                   content_type='text/plain', request=req)
         account_list = broker.list_containers_iter(limit, marker, end_marker,
                                                    prefix, delimiter)
+
         if out_content_type == 'application/json':
             json_pattern = ['"name":%s', '"count":%s', '"bytes":%s']
             json_pattern = '{' + ','.join(json_pattern) + '}'
@@ -298,15 +324,29 @@ class AccountController(object):
             return HTTPNotFound(request=req)
         timestamp = normalize_timestamp(req.headers['x-timestamp'])
         metadata = {}
-        metadata.update((key, (value, timestamp))
-            for key, value in req.headers.iteritems()
-            if key.lower().startswith('x-account-meta-'))
+        if not self.fs_object:
+            metadata.update((key, (value, timestamp))
+                for key, value in req.headers.iteritems()
+                if key.lower().startswith('x-account-meta-'))
+        else:
+            metadata.update((key, value)
+                for key, value in req.headers.iteritems()
+                if key.lower().startswith('x-account-meta-'))
         if metadata:
             broker.update_metadata(metadata)
         return HTTPNoContent(request=req)
 
+    def plugin(self, env):
+        if env.get('Gluster_enabled', False):
+            self.fs_object = env.get('fs_object')
+            self.root = env.get('root')
+            self.mount_check = False
+        else:
+            self.fs_object = None
+
     def __call__(self, env, start_response):
         start_time = time.time()
+        self.plugin(env)
         req = Request(env)
         self.logger.txn_id = req.headers.get('x-trans-id', None)
         if not check_utf8(req.path_info):
